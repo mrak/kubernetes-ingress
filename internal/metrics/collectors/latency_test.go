@@ -23,35 +23,48 @@ func TestParseMessageWithValidInputs(t *testing.T) {
 		expected    latencyMetric
 	}{
 		{
-			msg:         `nginx: {"upstreamAddress":"10.0.0.1", "upstreamResponseTime":"0.003", "proxyHost":"upstream-1", "upstreamStatus": "200"}`,
+			msg:         `nginx: {"upstreamAddress":"10.0.0.1", "upstreamResponseTime":"0.003", "proxyHost":"upstream-1", "upstreamStatus": "200", "requestMethod": "GET"}`,
 			expectedErr: false,
 			expected: latencyMetric{
 				Upstream: "upstream-1",
 				Server:   "10.0.0.1",
 				Latency:  0.003,
+				Method:   "GET",
 				Code:     "200",
 			},
 		},
 		{
-			msg:         `nginx: {"upstreamAddress":"127.0.0.1:6001, 127.0.0.1:6002, 127.0.0.1:8001", "upstreamResponseTime":"0.9, 0.99, 0.1", "proxyHost":"upstream-1", "upstreamStatus": "500, 500, 200"}`,
+			msg:         `nginx: {"upstreamAddress":"127.0.0.1:6001, 127.0.0.1:6002, 127.0.0.1:8001", "upstreamResponseTime":"0.9, 0.99, 0.1", "proxyHost":"upstream-1", "upstreamStatus": "500, 500, 200", "requestMethod": "GET"}`,
 			expectedErr: false,
 			expected: latencyMetric{
 				Upstream: "upstream-1",
 				Server:   "127.0.0.1:8001",
 				Latency:  0.1,
+				Method:   "GET",
 				Code:     "200",
 			},
 		},
 		{
-			msg:         `nginx: {"upstreamAddress":"upstream-1", "upstreamResponseTime":"0.0", "proxyHost":"upstream-1", "upstreamStatus": "404"}`,
+			msg:         `nginx: {"upstreamAddress":"127.0.0.1:6001, 127.0.0.1:6002, 127.0.0.1:8001", "upstreamResponseTime":"0.9, 0.99, 0.1", "proxyHost":"upstream-1", "upstreamStatus": "500, 500, 200", "requestMethod": "GIBBERISH"}`,
+			expectedErr: false,
+			expected: latencyMetric{
+				Upstream: "upstream-1",
+				Server:   "127.0.0.1:8001",
+				Latency:  0.1,
+				Method:   "OTHER",
+				Code:     "200",
+			},
+		},
+		{
+			msg:         `nginx: {"upstreamAddress":"upstream-1", "upstreamResponseTime":"0.0", "proxyHost":"upstream-1", "upstreamStatus": "404", "requestMethod": "GET"}`,
 			expectedErr: true,
 		},
 		{
-			msg:         `nginx: {"upstreamAddress":"-", "upstreamResponseTime":"0.0", "proxyHost":"-", "upstreamStatus": "404"}`,
+			msg:         `nginx: {"upstreamAddress":"-", "upstreamResponseTime":"0.0", "proxyHost":"-", "upstreamStatus": "404", "requestMethod": "GET"}`,
 			expectedErr: true,
 		},
 		{
-			msg:         `nginx: {"upstreamAddress":"10.0.0.1", "upstreamResponseTime":"not-a-float", "proxyHost":"upstream-1", "upstreamStatus": "404"}`,
+			msg:         `nginx: {"upstreamAddress":"10.0.0.1", "upstreamResponseTime":"not-a-float", "proxyHost":"upstream-1", "upstreamStatus": "404", "requestMethod": "GET"}`,
 			expectedErr: true,
 		},
 		{
@@ -82,7 +95,7 @@ func TestParseMessageWithValidInputs(t *testing.T) {
 
 func TestCreateLatencyLabelNames(t *testing.T) {
 	t.Parallel()
-	expected := []string{"upstream", "server", "code", "one", "two", "three", "four", "five"}
+	expected := []string{"upstream", "server", "code", "method", "one", "two", "three", "four", "five"}
 	actual := createLatencyLabelNames([]string{"one", "two", "three"}, []string{"four", "five"})
 	if !reflect.DeepEqual(expected, actual) {
 		t.Errorf("createLatencyLabelNames returned: %v, expected: %v", actual, expected)
@@ -91,7 +104,7 @@ func TestCreateLatencyLabelNames(t *testing.T) {
 
 func TestCreateLatencyLabelNamesWithNilInputs(t *testing.T) {
 	t.Parallel()
-	expected := []string{"upstream", "server", "code"}
+	expected := []string{"upstream", "server", "code", "method"}
 	actual := createLatencyLabelNames(nil, nil)
 	if !reflect.DeepEqual(expected, actual) {
 		t.Errorf("createLatencyLabelNames returned: %v, expected: %v", actual, expected)
@@ -107,9 +120,10 @@ func TestCreateLatencyLabelValuesWithCorrectNumberOfLabels(t *testing.T) {
 	lm := latencyMetric{
 		Upstream: "upstream-1",
 		Server:   "10.0.0.1",
+		Method:   "GET",
 		Code:     "200",
 	}
-	expected := []string{"upstream-1", "10.0.0.1", "200", "service-1", "ingress", "ingress-1", "default", "pod-1"}
+	expected := []string{"upstream-1", "10.0.0.1", "200", "GET", "service-1", "ingress", "ingress-1", "default", "pod-1"}
 	actual, err := collector.createLatencyLabelValues(lm)
 	if err != nil {
 		t.Fatalf("createLatencyLabelValues returned unexpected error: %v", err)
@@ -126,6 +140,7 @@ func TestCreateLatencyLabelValuesWithNoUpstreamServerLabels(t *testing.T) {
 	lm := latencyMetric{
 		Upstream: "upstream-1",
 		Server:   "10.0.0.1",
+		Method:   "GET",
 		Code:     "200",
 	}
 	_, err := collector.createLatencyLabelValues(lm)
@@ -141,6 +156,7 @@ func TestCreateLatencyLabelValuesWithNoUpstreamPeerServerLabels(t *testing.T) {
 	lm := latencyMetric{
 		Upstream: "upstream-1",
 		Server:   "10.0.0.1",
+		Method:   "GET",
 		Code:     "200",
 	}
 	_, err := collector.createLatencyLabelValues(lm)
@@ -155,6 +171,7 @@ func TestCreateLatencyLabelValuesWithNoLabels(t *testing.T) {
 	lm := latencyMetric{
 		Upstream: "upstream-1",
 		Server:   "10.0.0.1",
+		Method:   "GET",
 		Code:     "200",
 	}
 	_, err := collector.createLatencyLabelValues(lm)

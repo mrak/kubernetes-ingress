@@ -227,7 +227,7 @@ func (l *LatencyMetricsCollector) listAndDeleteMetricsPublished(key string) (met
 }
 
 func (l *LatencyMetricsCollector) createLatencyLabelValues(lm latencyMetric) ([]string, error) {
-	labelValues := []string{lm.Upstream, lm.Server, lm.Code}
+	labelValues := []string{lm.Upstream, lm.Server, lm.Code, lm.Method}
 	upstreamServerLabelValues := l.getUpstreamServerLabels(lm.Upstream)
 	if len(l.upstreamServerLabelNames) != len(upstreamServerLabelValues) {
 		return nil, fmt.Errorf("wrong number of labels for upstream %v. For labels %v, got values: %v",
@@ -244,11 +244,12 @@ func (l *LatencyMetricsCollector) createLatencyLabelValues(lm latencyMetric) ([]
 }
 
 func createLatencyLabelNames(upstreamServerLabelNames, upstreamServerPeerLabelNames []string) []string {
-	return append(append([]string{"upstream", "server", "code"}, upstreamServerLabelNames...), upstreamServerPeerLabelNames...)
+	return append(append([]string{"upstream", "server", "code", "method"}, upstreamServerLabelNames...), upstreamServerPeerLabelNames...)
 }
 
 type syslogMsg struct {
 	ProxyHost            string `json:"proxyHost"`
+	RequestMethod        string `json:"requestMethod"`
 	UpstreamAddr         string `json:"upstreamAddress"`
 	UpstreamStatus       string `json:"upstreamStatus"`
 	UpstreamResponseTime string `json:"upstreamResponseTime"`
@@ -258,7 +259,18 @@ type latencyMetric struct {
 	Upstream string
 	Server   string
 	Code     string
+	Method   string
 	Latency  float64
+}
+
+// avoid possible cardinality explosion with arbitrary client-supplied HTTP verbs
+func sanitizeRequestMethod(method string) string {
+	switch method {
+	case "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE", "DEBUG", "TRACK", "PROPFIND", "SEARCH":
+		return method
+	default:
+		return "OTHER"
+	}
 }
 
 func parseMessage(msg string) (latencyMetric, error) {
@@ -275,6 +287,7 @@ func parseMessage(msg string) (latencyMetric, error) {
 		// no upstream connected so don't publish a metric
 		return latencyMetric{}, fmt.Errorf("nginx could not connect to upstream")
 	}
+	method := sanitizeRequestMethod(sm.RequestMethod)
 	server := parseMultipartResponse(sm.UpstreamAddr)
 	latency, err := strconv.ParseFloat(parseMultipartResponse(sm.UpstreamResponseTime), 64)
 	if err != nil {
@@ -285,6 +298,7 @@ func parseMessage(msg string) (latencyMetric, error) {
 		Upstream: sm.ProxyHost,
 		Server:   server,
 		Code:     code,
+		Method:   method,
 		Latency:  latency,
 	}
 
