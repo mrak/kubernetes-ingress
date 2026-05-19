@@ -105,6 +105,24 @@ func main() {
 	if err != nil {
 		nl.Fatalf(l, "Failed to get pod: %v", err)
 	}
+
+	var controllerZone string
+	if pod.Spec.NodeName == "" {
+		nl.Warnf(l, "Pod has no spec.nodeName; cannot determine controller zone, topology-aware routing unavailable")
+	} else {
+		node, err := kubeClient.CoreV1().Nodes().Get(ctx, pod.Spec.NodeName, meta_v1.GetOptions{})
+		if err != nil {
+			nl.Warnf(l, "Failed to get node %s for zone detection: %v; topology-aware routing unavailable", pod.Spec.NodeName, err)
+		} else {
+			controllerZone = node.Labels["topology.kubernetes.io/zone"]
+			if controllerZone == "" {
+				nl.Warnf(l, "Node %s has no topology.kubernetes.io/zone label; zone-based topology-aware routing unavailable", pod.Spec.NodeName)
+			} else {
+				nl.Infof(l, "Controller zone: %s (topology-aware routing enabled)", controllerZone)
+			}
+		}
+	}
+
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(func(format string, args ...interface{}) {
 		nl.Infof(l, format, args...)
@@ -343,6 +361,8 @@ func main() {
 		DynamicWeightChangesReload:   *enableDynamicWeightChangesReload,
 		InstallationFlags:            parsedFlags,
 		ShuttingDown:                 false,
+		Zone:                         controllerZone,
+		NodeName:                     pod.Spec.NodeName,
 	}
 
 	lbc := k8s.NewLoadBalancerController(lbcInput)
