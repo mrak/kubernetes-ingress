@@ -113,6 +113,8 @@ type specialSecrets struct {
 type controllerMetadata struct {
 	namespace string
 	pod       *api_v1.Pod
+	zone      string
+	nodeName  string
 }
 
 // LoadBalancerController watches Kubernetes API and
@@ -245,6 +247,8 @@ type NewLoadBalancerControllerInput struct {
 	DynamicWeightChangesReload   bool
 	InstallationFlags            []string
 	ShuttingDown                 bool
+	Zone                         string
+	NodeName                     string
 }
 
 // NewLoadBalancerController creates a controller
@@ -277,7 +281,7 @@ func NewLoadBalancerController(input NewLoadBalancerControllerInput) *LoadBalanc
 		resync:                       input.ResyncPeriod,
 		namespaceList:                input.Namespace,
 		secretNamespaceList:          input.SecretNamespace,
-		metadata:                     controllerMetadata{namespace: input.ControllerNamespace, pod: input.Pod},
+		metadata:                     controllerMetadata{namespace: input.ControllerNamespace, pod: input.Pod, zone: input.Zone, nodeName: input.NodeName},
 		areCustomResourcesEnabled:    input.AreCustomResourcesEnabled,
 		enableOIDC:                   input.EnableOIDC,
 		metricsCollector:             input.MetricsCollector,
@@ -3201,7 +3205,7 @@ func (lbc *LoadBalancerController) getEndpointsForServiceWithSubselector(targetP
 		return nil, err
 	}
 
-	endps = getEndpointsFromEndpointSlicesForSubselectedPods(targetPort, pods, svcEndpointSlices)
+	endps = getEndpointsFromEndpointSlicesForSubselectedPods(targetPort, pods, svcEndpointSlices, lbc.metadata.nodeName, lbc.metadata.zone)
 	return endps, nil
 }
 
@@ -3221,8 +3225,10 @@ func selectEndpointSlicesForPort(targetPort int32, esx []discovery_v1.EndpointSl
 	return eps
 }
 
-// filterReadyEndpoinsFrom returns ready Endpoints from given EndpointSlices.
-func filterReadyEndpointsFrom(esx []discovery_v1.EndpointSlice) []discovery_v1.Endpoint {
+// filterReadyEndpointsFrom returns ready Endpoints from given EndpointSlices,
+// then applies topology-aware filtering using hints.
+// Priority: ForNodes (same-node) > ForZones (same-zone) > all ready endpoints (fallback).
+func filterReadyEndpointsFrom(esx []discovery_v1.EndpointSlice, nodeName, zone string) []discovery_v1.Endpoint {
 	epx := make([]discovery_v1.Endpoint, 0, len(esx))
 	for _, es := range esx {
 		for _, e := range es.Endpoints {
@@ -3234,10 +3240,52 @@ func filterReadyEndpointsFrom(esx []discovery_v1.EndpointSlice) []discovery_v1.E
 			}
 		}
 	}
-	return epx
+	return filterEndpointsByTopologyHints(epx, nodeName, zone)
 }
 
-func getEndpointsFromEndpointSlicesForSubselectedPods(targetPort int32, pods []*api_v1.Pod, svcEndpointSlices []discovery_v1.EndpointSlice) (podEndpoints []podEndpoint) {
+// filterEndpointsByTopologyHints filters endpoints based on topology hints.
+// Priority: ForNodes (same-node) > ForZones (same-zone) > all endpoints (fallback).
+// Returns all endpoints unchanged if: no hints exist on any endpoint, the relevant
+// identity (nodeName/zone) is empty, or filtering would yield zero endpoints.
+func filterEndpointsByTopologyHints(endpoints []discovery_v1.Endpoint, nodeName, zone string) []discovery_v1.Endpoint {
+	if nodeName == "" && zone == "" {
+		return endpoints
+	}
+
+	var nodeFiltered, zoneFiltered []discovery_v1.Endpoint
+
+	for _, ep := range endpoints {
+		if ep.Hints == nil {
+			continue
+		}
+		if nodeName != "" {
+			for _, fn := range ep.Hints.ForNodes {
+				if fn.Name == nodeName {
+					nodeFiltered = append(nodeFiltered, ep)
+					break
+				}
+			}
+		}
+		if zone != "" {
+			for _, fz := range ep.Hints.ForZones {
+				if fz.Name == zone {
+					zoneFiltered = append(zoneFiltered, ep)
+					break
+				}
+			}
+		}
+	}
+
+	if len(nodeFiltered) > 0 {
+		return nodeFiltered
+	}
+	if len(zoneFiltered) > 0 {
+		return zoneFiltered
+	}
+	return endpoints
+}
+
+func getEndpointsFromEndpointSlicesForSubselectedPods(targetPort int32, pods []*api_v1.Pod, svcEndpointSlices []discovery_v1.EndpointSlice, nodeName, zone string) (podEndpoints []podEndpoint) {
 	// Match ready endpoints IP ddresses with Pod's IP. If they match create a new podEnpoint.
 	makePodEndpoints := func(pods []*api_v1.Pod, endpoints []discovery_v1.Endpoint) []podEndpoint {
 		endpointSet := make(map[podEndpoint]struct{})
@@ -3264,7 +3312,7 @@ func getEndpointsFromEndpointSlicesForSubselectedPods(targetPort int32, pods []*
 		return slices.Collect(maps.Keys(endpointSet))
 	}
 
-	return makePodEndpoints(pods, filterReadyEndpointsFrom(selectEndpointSlicesForPort(targetPort, svcEndpointSlices)))
+	return makePodEndpoints(pods, filterReadyEndpointsFrom(selectEndpointSlicesForPort(targetPort, svcEndpointSlices), nodeName, zone))
 }
 
 func ipv6SafeAddrPort(addr string, port int32) string {
@@ -3402,7 +3450,7 @@ func (lbc *LoadBalancerController) getEndpointsForPortFromEndpointSlices(endpoin
 		return slices.Collect(maps.Keys(endpointSet))
 	}
 
-	endpoints := makePodEndpoints(targetPort, filterReadyEndpointsFrom(selectEndpointSlicesForPort(targetPort, endpointSlices)))
+	endpoints := makePodEndpoints(targetPort, filterReadyEndpointsFrom(selectEndpointSlicesForPort(targetPort, endpointSlices), lbc.metadata.nodeName, lbc.metadata.zone))
 	if len(endpoints) == 0 {
 		return nil, fmt.Errorf("no endpointslices for target port %v in service %s", targetPort, svc.Name)
 	}
